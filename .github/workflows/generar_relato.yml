@@ -2,7 +2,7 @@ name: Generar y Publicar Relato
 
 on:
   schedule:
-    - cron: "0 15 * * *"  # 11:00 hora Chile (UTC-4) todos los dias
+    - cron: "0 15 * * 1,4,6"  # 11:00 hora Chile (UTC-4), solo lunes, jueves y sabado
   workflow_dispatch: {}
 
 concurrency:

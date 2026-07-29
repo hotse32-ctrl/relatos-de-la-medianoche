@@ -102,7 +102,10 @@ def leer_texto_docx(ruta_docx: Path) -> str:
 
 async def generar_audio_tts(texto: str, ruta_salida: Path, voz: str = VOZ):
     comunicador = edge_tts.Communicate(texto, voz)
-    await comunicador.save(str(ruta_salida))
+    # Timeout de seguridad: si el servicio de Microsoft Edge se queda sin
+    # responder (colgado), esto evita que el job entero se atasque por horas
+    # hasta que lo mate el timeout de GitHub Actions (60 min).
+    await asyncio.wait_for(comunicador.save(str(ruta_salida)), timeout=180)
 
 
 def _generar_silencio_mp3(ruta_salida: Path, duracion: float):
@@ -380,10 +383,13 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
     print(f"Texto: {len(texto)} caracteres | Imagenes: {len(imagenes)}")
 
     # --- Narracion ---
+    print("Generando narracion con edge-tts...")
     ruta_tts_crudo = TMP_DIR / "narracion_cruda.mp3"
     asyncio.run(generar_audio_tts(texto, ruta_tts_crudo))
+    print("Narracion generada. Agregando silencios...")
     ruta_narracion_final = TMP_DIR / "narracion_final.mp3"
     agregar_silencios(ruta_tts_crudo, ruta_narracion_final)
+    print("Audio final listo.")
 
     audio_final = AudioFileClip(str(ruta_narracion_final))
     duracion_total = audio_final.duration
@@ -404,16 +410,19 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
         print("[AVISO] No se encontro intro.mp4 en el repo, se genera el video sin intro.")
         video_final = video_relato
 
+    print("Renderizando video final (esto puede tardar varios minutos)...")
     ruta_video_final = TMP_DIR / f"{nombre_historia}.mp4"
     video_final.write_videofile(
-        str(ruta_video_final), fps=30, codec="libx264", audio_codec="aac", logger=None
+        str(ruta_video_final), fps=30, codec="libx264", audio_codec="aac", logger="bar"
     )
+    print("Video renderizado.")
 
     # --- Metadatos ---
     titulo, descripcion = generar_metadatos(nombre_historia, texto)
     print(f"Titulo: {titulo}")
 
     # --- Publicar en YouTube ---
+    print("Subiendo video a YouTube...")
     video_id = publicar_en_youtube(youtube_service, ruta_video_final, titulo, descripcion)
     print(f"Publicado en YouTube: https://youtube.com/watch?v={video_id}")
 

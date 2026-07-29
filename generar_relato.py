@@ -431,6 +431,26 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
     return True
 
 
+def ya_se_publico_hoy(drive_service, carpeta_videos_gen_id) -> bool:
+    """Contador diario: True si ya existe la carpeta de hoy (Videos Generados/YYYY-MM-DD/)
+    con al menos un video adentro. Evita publicar mas de 1 historia el mismo dia,
+    incluso si el workflow se dispara manualmente varias veces."""
+    hoy = ahora_chile().date().isoformat()
+    query = (
+        f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
+        f"and '{carpeta_videos_gen_id}' in parents and trashed = false"
+    )
+    resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    carpetas_hoy = resultado.get("files", [])
+    if not carpetas_hoy:
+        return False
+    contenido = drive_service.files().list(
+        q=f"'{carpetas_hoy[0]['id']}' in parents and trashed = false",
+        fields="files(id)",
+    ).execute()
+    return len(contenido.get("files", [])) > 0
+
+
 def main():
     print("== Relatos de la Medianoche: generador de videos ==")
 
@@ -442,6 +462,10 @@ def main():
     carpeta_pendientes_id = buscar_id_subcarpeta(drive_service, CARPETA_PENDIENTES, DRIVE_FOLDER_ID_RAIZ)
     carpeta_subidas_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_SUBIDAS, DRIVE_FOLDER_ID_RAIZ)
     carpeta_videos_gen_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_GENERADOS, DRIVE_FOLDER_ID_RAIZ)
+
+    if ya_se_publico_hoy(drive_service, carpeta_videos_gen_id):
+        print("Ya se publico una historia hoy (maximo 1 por dia). No se hace nada mas.")
+        return
 
     procesar_una_historia(
         drive_service, youtube_service,

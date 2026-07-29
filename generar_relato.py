@@ -254,23 +254,51 @@ def obtener_historia_mas_antigua(drive_service, carpeta_pendientes_id: str):
     return carpetas[0] if carpetas else None
 
 
+GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
+DOCX_EXPORT_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
 def descargar_carpeta_historia(drive_service, carpeta_id: str, destino_local: Path):
-    """Descarga todos los archivos (imagenes + docx) de la carpeta de la historia."""
+    """Descarga todos los archivos (imagenes + texto) de la carpeta de la historia.
+
+    Acepta el texto de la historia en dos formatos:
+    - Un archivo .docx real (subido directamente a Drive).
+    - Un Google Doc nativo (creado/editado desde Google Docs) - en este caso se
+      exporta automaticamente a .docx antes de guardarlo localmente, para que el
+      resto del pipeline (leer_texto_docx) funcione igual en ambos casos.
+    """
     destino_local.mkdir(parents=True, exist_ok=True)
     resultado = drive_service.files().list(
         q=f"'{carpeta_id}' in parents and trashed = false",
         fields="files(id, name, mimeType)",
     ).execute()
     archivos = resultado.get("files", [])
+    archivos_normalizados = []
     for archivo in archivos:
-        ruta_local = destino_local / archivo["name"]
-        request = drive_service.files().get_media(fileId=archivo["id"])
-        with open(ruta_local, "wb") as f:
-            downloader = MediaIoBaseDownload(f, request)
-            listo = False
-            while not listo:
-                _, listo = downloader.next_chunk()
-    return archivos
+        nombre = archivo["name"]
+        if archivo.get("mimeType") == GOOGLE_DOC_MIME:
+            # Google Doc nativo -> exportar como .docx
+            if not nombre.lower().endswith(".docx"):
+                nombre = nombre + ".docx"
+            ruta_local = destino_local / nombre
+            request = drive_service.files().export_media(
+                fileId=archivo["id"], mimeType=DOCX_EXPORT_MIME
+            )
+            with open(ruta_local, "wb") as f:
+                downloader = MediaIoBaseDownload(f, request)
+                listo = False
+                while not listo:
+                    _, listo = downloader.next_chunk()
+        else:
+            ruta_local = destino_local / nombre
+            request = drive_service.files().get_media(fileId=archivo["id"])
+            with open(ruta_local, "wb") as f:
+                downloader = MediaIoBaseDownload(f, request)
+                listo = False
+                while not listo:
+                    _, listo = downloader.next_chunk()
+        archivos_normalizados.append({**archivo, "name": nombre})
+    return archivos_normalizados
 
 
 def subir_archivo_drive(drive_service, ruta_local: Path, carpeta_id: str, nombre: str = None):

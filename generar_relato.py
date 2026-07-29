@@ -46,6 +46,7 @@ if not hasattr(Image, "ANTIALIAS"):
 from moviepy.editor import (
     ImageClip,
     AudioFileClip,
+    VideoFileClip,
     concatenate_audioclips,
     concatenate_videoclips,
     CompositeVideoClip,
@@ -68,6 +69,10 @@ DRIVE_FOLDER_ID_RAIZ = os.environ.get("DRIVE_FOLDER_ID_RAIZ")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 ANCHO, ALTO = 1920, 1080  # formato horizontal, video largo tipo podcast
+
+# Video de intro del canal (se pega al inicio de cada historia). Debe estar
+# en la raiz del repo, junto a este script.
+RUTA_INTRO = Path(__file__).parent / "intro.mp4"
 
 TMP_DIR = Path(tempfile.mkdtemp(prefix="relatos_medianoche_"))
 
@@ -385,7 +390,19 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
 
     # --- Video ---
     video_imagenes = construir_video(imagenes, duracion_total)
-    video_final = video_imagenes.set_audio(audio_final)
+    video_relato = video_imagenes.set_audio(audio_final)
+
+    if RUTA_INTRO.exists():
+        intro_clip = VideoFileClip(str(RUTA_INTRO)).resize(height=ALTO)
+        if intro_clip.w < ANCHO:
+            intro_clip = intro_clip.resize(width=ANCHO)
+        intro_clip = intro_clip.crop(
+            x_center=intro_clip.w / 2, y_center=intro_clip.h / 2, width=ANCHO, height=ALTO
+        )
+        video_final = concatenate_videoclips([intro_clip, video_relato], method="compose")
+    else:
+        print("[AVISO] No se encontro intro.mp4 en el repo, se genera el video sin intro.")
+        video_final = video_relato
 
     ruta_video_final = TMP_DIR / f"{nombre_historia}.mp4"
     video_final.write_videofile(

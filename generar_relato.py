@@ -22,6 +22,9 @@ import os
 import re
 import json
 import random
+import ssl
+import time
+import socket
 import datetime
 import tempfile
 import subprocess
@@ -189,6 +192,29 @@ def generar_metadatos(nombre_historia: str, texto: str):
     titulo = f"{nombre_historia} | Relatos de la Medianoche"
     descripcion = f"{nombre_historia}\n\nUna historia real de terror narrada en Relatos de la Medianoche."
     return titulo, descripcion
+
+
+# ---------------------------------------------------------------------------
+# Reintentos (las llamadas a Drive a veces fallan con errores de red
+# transitorios, por ejemplo ssl.SSLEOFError, despues de que YouTube ya
+# publico el video. Reintentar evita que un corte de red tire todo el
+# trabajo ya hecho).
+# ---------------------------------------------------------------------------
+
+def con_reintentos(func, intentos=6, espera_base=5, descripcion="operacion de Drive"):
+    """Ejecuta func() reintentando con backoff exponencial si falla por un
+    error de red transitorio (SSL/socket). Si se agotan los intentos,
+    relanza la ultima excepcion."""
+    for intento in range(1, intentos + 1):
+        try:
+            return func()
+        except (ssl.SSLError, socket.error, ConnectionError, TimeoutError) as e:
+            if intento == intentos:
+                print(f"[ERROR] {descripcion} fallo tras {intentos} intentos: {e}")
+                raise
+            espera = espera_base * (2 ** (intento - 1))
+            print(f"[AVISO] {descripcion} fallo (intento {intento}/{intentos}): {e}. Reintentando en {espera}s...")
+            time.sleep(espera)
 
 
 # ---------------------------------------------------------------------------
@@ -426,16 +452,40 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
     video_id = publicar_en_youtube(youtube_service, ruta_video_final, titulo, descripcion)
     print(f"Publicado en YouTube: https://youtube.com/watch?v={video_id}")
 
-    # --- Guardar copia en Drive: Videos Generados/YYYY-MM-DD/ ---
-    hoy = ahora_chile().date().isoformat()
-    carpeta_fecha_id = crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id)
-    subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_id)
-    print(f"Copia guardada en Drive: Videos Generados/{hoy}/{ruta_video_final.name}")
+    # --- PASO CRITICO: mover la carpeta completa (imagenes + docx, tal cual
+    # esta, sin tocarla por partes ni crear subcarpetas intermedias) de
+    # Pendientes/ a Subidas/ en una sola llamada atomica a la API de Drive.
+    # Esto se hace INMEDIATAMENTE despues de publicar en YouTube, antes de
+    # cualquier otro paso de Drive, para que -aunque algo falle despues
+    # (ej. un corte de red al subir la copia de respaldo)- la historia ya
+    # quede marcada como subida y el pipeline nunca la vuelva a publicar
+    # duplicada. Se reintenta con backoff si hay un error de red transitorio.
+    con_reintentos(
+        lambda: mover_carpeta_drive(drive_service, carpeta_id, carpeta_pendientes_id, carpeta_subidas_id),
+        descripcion=f"mover carpeta '{nombre_historia}' a Subidas/",
+    )
+    print(f"Carpeta '{nombre_historia}' movida completa a Subidas/ (ya no se puede duplicar).")
 
-    # --- Guardar el video tambien dentro de la carpeta de la historia, y mover todo a Subidas ---
-    subir_archivo_drive(drive_service, ruta_video_final, carpeta_id)
-    mover_carpeta_drive(drive_service, carpeta_id, carpeta_pendientes_id, carpeta_subidas_id)
-    print(f"Carpeta '{nombre_historia}' movida a Subidas/ (con video incluido)")
+    # --- Respaldo del video (no critico): copia dentro de la carpeta ya
+    # movida y copia en Videos Generados/YYYY-MM-DD/. Si esto falla, no pasa
+    # nada grave: la historia ya esta a salvo en Subidas/ y en YouTube.
+    try:
+        con_reintentos(
+            lambda: subir_archivo_drive(drive_service, ruta_video_final, carpeta_id),
+            descripcion="subir copia del video a la carpeta de la historia",
+        )
+        hoy = ahora_chile().date().isoformat()
+        carpeta_fecha_id = con_reintentos(
+            lambda: crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id),
+            descripcion="crear/buscar subcarpeta de fecha en Videos Generados",
+        )
+        con_reintentos(
+            lambda: subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_id),
+            descripcion="subir copia de respaldo a Videos Generados",
+        )
+        print(f"Copia de respaldo guardada en Drive: Videos Generados/{hoy}/{ruta_video_final.name}")
+    except Exception as e:
+        print(f"[AVISO] No se pudo guardar la copia de respaldo en Drive (no critico, la historia ya esta segura): {e}")
 
     return True
 
@@ -468,11 +518,20 @@ def main():
     creds_youtube = obtener_credenciales_youtube()
     youtube_service = build("youtube", "v3", credentials=creds_youtube)
 
-    carpeta_pendientes_id = buscar_id_subcarpeta(drive_service, CARPETA_PENDIENTES, DRIVE_FOLDER_ID_RAIZ)
-    carpeta_subidas_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_SUBIDAS, DRIVE_FOLDER_ID_RAIZ)
-    carpeta_videos_gen_id = crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_GENERADOS, DRIVE_FOLDER_ID_RAIZ)
+    carpeta_pendientes_id = con_reintentos(
+        lambda: buscar_id_subcarpeta(drive_service, CARPETA_PENDIENTES, DRIVE_FOLDER_ID_RAIZ),
+        descripcion="buscar carpeta Pendientes/",
+    )
+    carpeta_subidas_id = con_reintentos(
+        lambda: crear_subcarpeta_si_no_existe(drive_service, CARPETA_SUBIDAS, DRIVE_FOLDER_ID_RAIZ),
+        descripcion="buscar/crear carpeta Subidas/",
+    )
+    carpeta_videos_gen_id = con_reintentos(
+        lambda: crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_GENERADOS, DRIVE_FOLDER_ID_RAIZ),
+        descripcion="buscar/crear carpeta Videos Generados/",
+    )
 
-    if ya_se_publico_hoy(drive_service, carpeta_videos_gen_id):
+    if con_reintentos(lambda: ya_se_publico_hoy(drive_service, carpeta_videos_gen_id), descripcion="verificar contador diario"):
         print("Ya se publico una historia hoy (maximo 1 por dia). No se hace nada mas.")
         return
 

@@ -59,7 +59,7 @@ from moviepy.editor import (
 # Configuracion
 # ---------------------------------------------------------------------------
 
-VOZ = "es-US-AlonsoNeural"  # narrador calmado y grave, pensado para relatos largos
+VOZ = "es-MX-JorgeNeural"  # voz unificada con Curiosidades de IA (pedido de Jose, 31 jul 2026)
 SILENCIO_INICIO = 1.0
 SILENCIO_FIN = 1.5
 TRANSICION = 0.6  # segundos de crossfade entre imagenes
@@ -79,15 +79,13 @@ RUTA_INTRO = Path(__file__).parent / "intro.mp4"
 
 TMP_DIR = Path(tempfile.mkdtemp(prefix="relatos_medianoche_"))
 
-# Offset horario de Chile respecto a UTC — lección aprendida de El Lado
+# Offset horario de Chile respecto a UTC — leccion aprendida de El Lado
 # Oscuro: nunca usar datetime.now()/date.today() crudo en un runner de
 # GitHub Actions (corre en UTC), siempre ajustar a la hora de Chile.
 OFFSET_CHILE = datetime.timedelta(hours=-4)
 
-
 def ahora_chile() -> datetime.datetime:
     return datetime.datetime.utcnow() + OFFSET_CHILE
-
 
 # ---------------------------------------------------------------------------
 # Lectura del texto de la historia (.docx)
@@ -97,7 +95,6 @@ def leer_texto_docx(ruta_docx: Path) -> str:
     documento = docx.Document(str(ruta_docx))
     parrafos = [p.text.strip() for p in documento.paragraphs if p.text.strip()]
     return "\n\n".join(parrafos)
-
 
 # ---------------------------------------------------------------------------
 # Audio (narracion completa con edge-tts)
@@ -110,14 +107,12 @@ async def generar_audio_tts(texto: str, ruta_salida: Path, voz: str = VOZ):
     # hasta que lo mate el timeout de GitHub Actions (60 min).
     await asyncio.wait_for(comunicador.save(str(ruta_salida)), timeout=180)
 
-
 def _generar_silencio_mp3(ruta_salida: Path, duracion: float):
     subprocess.run([
         "ffmpeg", "-y", "-f", "lavfi", "-i",
         "anullsrc=r=44100:cl=stereo", "-t", str(duracion),
         "-q:a", "9", str(ruta_salida)
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
 
 def agregar_silencios(ruta_audio_in: Path, ruta_audio_out: Path):
     clip = AudioFileClip(str(ruta_audio_in))
@@ -132,7 +127,6 @@ def agregar_silencios(ruta_audio_in: Path, ruta_audio_out: Path):
         p.close()
     final.close()
 
-
 # ---------------------------------------------------------------------------
 # Video (imagenes repartidas proporcional a la duracion total del audio)
 # ---------------------------------------------------------------------------
@@ -141,13 +135,11 @@ def numero_desde_nombre(ruta: Path) -> int:
     m = re.search(r"\d+", ruta.stem)
     return int(m.group()) if m else 0
 
-
 def ordenar_imagenes(carpeta: Path) -> list:
     extensiones = {".jpg", ".jpeg", ".png", ".webp"}
     imagenes = [p for p in carpeta.iterdir() if p.suffix.lower() in extensiones]
     imagenes.sort(key=numero_desde_nombre)
     return imagenes
-
 
 def crear_clip_imagen(ruta_imagen: Path, duracion: float) -> ImageClip:
     clip = ImageClip(str(ruta_imagen)).set_duration(duracion)
@@ -157,12 +149,10 @@ def crear_clip_imagen(ruta_imagen: Path, duracion: float) -> ImageClip:
     clip = clip.crop(x_center=clip.w / 2, y_center=clip.h / 2, width=ANCHO, height=ALTO)
     return clip.crossfadein(min(TRANSICION, duracion / 2))
 
-
 def construir_video(imagenes: list, duracion_total: float) -> CompositeVideoClip:
     duracion_por_imagen = duracion_total / len(imagenes)
     clips = [crear_clip_imagen(img, duracion_por_imagen) for img in imagenes]
     return concatenate_videoclips(clips, method="compose", padding=-TRANSICION)
-
 
 # ---------------------------------------------------------------------------
 # Titulo y descripcion
@@ -193,7 +183,6 @@ def generar_metadatos(nombre_historia: str, texto: str):
     descripcion = f"{nombre_historia}\n\nUna historia real de terror narrada en Relatos de la Medianoche."
     return titulo, descripcion
 
-
 # ---------------------------------------------------------------------------
 # Reintentos (las llamadas a Drive a veces fallan con errores de red
 # transitorios, por ejemplo ssl.SSLEOFError, despues de que YouTube ya
@@ -216,7 +205,6 @@ def con_reintentos(func, intentos=6, espera_base=5, descripcion="operacion de Dr
             print(f"[AVISO] {descripcion} fallo (intento {intento}/{intentos}): {e}. Reintentando en {espera}s...")
             time.sleep(espera)
 
-
 # ---------------------------------------------------------------------------
 # Google Drive helpers
 # ---------------------------------------------------------------------------
@@ -232,7 +220,6 @@ def obtener_credenciales_drive():
     creds.refresh(Request())
     return creds
 
-
 def obtener_credenciales_youtube():
     creds = Credentials(
         token=None,
@@ -244,7 +231,6 @@ def obtener_credenciales_youtube():
     creds.refresh(Request())
     return creds
 
-
 def buscar_id_subcarpeta(drive_service, nombre: str, carpeta_padre_id: str):
     query = (
         f"name = '{nombre}' and mimeType = 'application/vnd.google-apps.folder' "
@@ -255,7 +241,6 @@ def buscar_id_subcarpeta(drive_service, nombre: str, carpeta_padre_id: str):
     if not archivos:
         raise RuntimeError(f"No se encontro la carpeta '{nombre}' dentro de la carpeta raiz.")
     return archivos[0]["id"]
-
 
 def crear_subcarpeta_si_no_existe(drive_service, nombre: str, carpeta_padre_id: str):
     query = (
@@ -274,7 +259,6 @@ def crear_subcarpeta_si_no_existe(drive_service, nombre: str, carpeta_padre_id: 
     carpeta = drive_service.files().create(body=metadata, fields="id").execute()
     return carpeta["id"]
 
-
 def obtener_historia_mas_antigua(drive_service, carpeta_pendientes_id: str):
     """Devuelve la subcarpeta de historia mas antigua dentro de Pendientes/, o None."""
     query = (
@@ -287,10 +271,8 @@ def obtener_historia_mas_antigua(drive_service, carpeta_pendientes_id: str):
     carpetas = resultado.get("files", [])
     return carpetas[0] if carpetas else None
 
-
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 DOCX_EXPORT_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-
 
 def descargar_carpeta_historia(drive_service, carpeta_id: str, destino_local: Path):
     """Descarga todos los archivos (imagenes + texto) de la carpeta de la historia.
@@ -334,13 +316,11 @@ def descargar_carpeta_historia(drive_service, carpeta_id: str, destino_local: Pa
         archivos_normalizados.append({**archivo, "name": nombre})
     return archivos_normalizados
 
-
 def subir_archivo_drive(drive_service, ruta_local: Path, carpeta_id: str, nombre: str = None):
     metadata = {"name": nombre or ruta_local.name, "parents": [carpeta_id]}
     media = MediaFileUpload(str(ruta_local), resumable=True)
     archivo = drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
     return archivo["id"]
-
 
 def mover_carpeta_drive(drive_service, carpeta_id: str, carpeta_origen_id: str, carpeta_destino_id: str):
     """Mueve la carpeta completa (y todo su contenido) de origen a destino."""
@@ -350,7 +330,6 @@ def mover_carpeta_drive(drive_service, carpeta_id: str, carpeta_origen_id: str, 
         removeParents=carpeta_origen_id,
         fields="id, parents",
     ).execute()
-
 
 # ---------------------------------------------------------------------------
 # YouTube
@@ -375,7 +354,6 @@ def publicar_en_youtube(youtube_service, ruta_video: Path, titulo: str, descripc
     while respuesta is None:
         _, respuesta = request.next_chunk()
     return respuesta["id"]
-
 
 # ---------------------------------------------------------------------------
 # Flujo principal
@@ -489,7 +467,6 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
 
     return True
 
-
 def ya_se_publico_hoy(drive_service, carpeta_videos_gen_id) -> bool:
     """Contador diario: True si ya existe la carpeta de hoy (Videos Generados/YYYY-MM-DD/)
     con al menos un video adentro. Evita publicar mas de 1 historia el mismo dia,
@@ -508,7 +485,6 @@ def ya_se_publico_hoy(drive_service, carpeta_videos_gen_id) -> bool:
         fields="files(id)",
     ).execute()
     return len(contenido.get("files", [])) > 0
-
 
 def main():
     print("== Relatos de la Medianoche: generador de videos ==")
@@ -541,7 +517,6 @@ def main():
     )
 
     print("== Proceso completado ==")
-
 
 if __name__ == "__main__":
     main()

@@ -12,7 +12,7 @@ concurrency:
 jobs:
   generar:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@v4

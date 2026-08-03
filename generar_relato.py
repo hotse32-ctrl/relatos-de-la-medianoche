@@ -17,6 +17,14 @@ Orden nuevo:
 Si YouTube falla: el video queda en "Videos Generados/" (a salvo, facil
 de reintentar) y la historia sigue en "Pendientes/" (no se pierde ni se
 marca como terminada por error).
+
+CAMBIO 03-08-2026 #2 (a pedido de Jose, via Claude): el contador diario
+"ya_se_publico_hoy()" ya NO depende de si hay algun archivo suelto dentro
+de Videos Subidos/YYYY-MM-DD/. Un video puede quedar ahi por error (por
+ejemplo si un reintento manual lo dejo a medio mover) sin que la historia
+se haya publicado de verdad, y eso bloqueaba el pipeline con un falso
+positivo. Ahora el contador se basa en la señal definitiva de exito: si
+ya se movio una carpeta de historia completa a "Subidas/" hoy.
 """
 
 import os
@@ -400,21 +408,22 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
 
     return True
 
-def ya_se_publico_hoy(drive_service, carpeta_videos_subidos_id) -> bool:
-    hoy = ahora_chile().date().isoformat()
+def ya_se_publico_hoy(drive_service, carpeta_subidas_id) -> bool:
+    """Contador diario: True si hoy (hora de Chile) ya se movio al menos una
+    carpeta de historia completa a Subidas/. Esta es la senal definitiva de
+    que una historia se publico con exito de principio a fin: no depende de
+    si quedo algun archivo de video suelto en Videos Subidos/ (que puede
+    pasar por un rechazo de YouTube o un reintento manual a medias, y antes
+    generaba falsos positivos que bloqueaban el pipeline sin necesidad)."""
+    inicio_hoy_chile = ahora_chile().replace(hour=0, minute=0, second=0, microsecond=0)
+    inicio_hoy_utc = (inicio_hoy_chile - OFFSET_CHILE).strftime("%Y-%m-%dT%H:%M:%S")
     query = (
-        f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
-        f"and '{carpeta_videos_subidos_id}' in parents and trashed = false"
+        f"'{carpeta_subidas_id}' in parents and trashed = false "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and modifiedTime >= '{inicio_hoy_utc}'"
     )
     resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    carpetas_hoy = resultado.get("files", [])
-    if not carpetas_hoy:
-        return False
-    contenido = drive_service.files().list(
-        q=f"'{carpetas_hoy[0]['id']}' in parents and trashed = false",
-        fields="files(id)",
-    ).execute()
-    return len(contenido.get("files", [])) > 0
+    return len(resultado.get("files", [])) > 0
 
 def main():
     print("== Relatos de la Medianoche: generador de videos ==")
@@ -441,7 +450,7 @@ def main():
         descripcion="buscar/crear carpeta Videos Subidos/",
     )
 
-    if con_reintentos(lambda: ya_se_publico_hoy(drive_service, carpeta_videos_subidos_id), descripcion="verificar contador diario"):
+    if con_reintentos(lambda: ya_se_publico_hoy(drive_service, carpeta_subidas_id), descripcion="verificar contador diario"):
         print("Ya se publico una historia hoy (maximo 1 por dia). No se hace nada mas.")
         return
 

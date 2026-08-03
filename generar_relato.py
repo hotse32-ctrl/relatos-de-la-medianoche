@@ -1,21 +1,22 @@
 """
 Relatos de la Medianoche - Generador automatico de videos de terror
 ======================================================================
-Flujo:
-1. Buscar en Drive la carpeta de historia mas antigua dentro de "Pendientes/"
-   (cada carpeta = una historia, con imagenes numeradas 1,2,3... y un .docx
-   con el texto completo).
-2. Leer el texto completo desde el .docx.
-3. Narrar el texto completo con edge-tts (voz configurable).
-4. Armar el video: las imagenes se muestran en orden numerico, cada una
-   ocupando una porcion de tiempo proporcional a la duracion total del
-   audio (todas las imagenes se ven de principio a fin, ninguna se corta
-   ni se repite), con un crossfade suave entre ellas.
-5. Generar titulo/descripcion (Gemini, con respaldo local sin IA).
-6. Subir el video a YouTube (publico).
-7. Guardar copia en Drive: "Videos Generados/YYYY-MM-DD/".
-8. Mover la carpeta de la historia (imagenes + docx) de "Pendientes/" a
-   "Subidas/", junto con el video final ya generado.
+CAMBIO 03-08-2026 (a pedido de Jose, via Claude): mejor flujo de subida.
+
+Orden nuevo:
+1. Renderizar el video.
+2. Subir el video a Drive, a "Videos Generados/YYYY-MM-DD/" (respaldo
+   inmediato, antes de tocar YouTube).
+3. Publicar en YouTube usando ese mismo archivo local.
+4. Si YouTube confirma exito: mover el archivo de video de
+   "Videos Generados/YYYY-MM-DD/" a "Videos Subidos/YYYY-MM-DD/"
+   (queda claro cuales videos ya estan publicados y confirmados).
+5. Recien ahi, mover la carpeta de la historia (imagenes + docx) de
+   "Pendientes/" a "Subidas/".
+
+Si YouTube falla: el video queda en "Videos Generados/" (a salvo, facil
+de reintentar) y la historia sigue en "Pendientes/" (no se pierde ni se
+marca como terminada por error).
 """
 
 import os
@@ -39,9 +40,6 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-# ---------------------------------------------------------------------------
-# Shim de compatibilidad Pillow / moviepy 1.0.3
-# ---------------------------------------------------------------------------
 from PIL import Image
 if not hasattr(Image, "ANTIALIAS"):
     Image.ANTIALIAS = Image.LANCZOS
@@ -55,56 +53,35 @@ from moviepy.editor import (
     CompositeVideoClip,
 )
 
-# ---------------------------------------------------------------------------
-# Configuracion
-# ---------------------------------------------------------------------------
-
-VOZ = "es-MX-JorgeNeural"  # voz unificada con Curiosidades de IA (pedido de Jose, 31 jul 2026)
+VOZ = "es-MX-JorgeNeural"
 SILENCIO_INICIO = 1.0
 SILENCIO_FIN = 1.5
-TRANSICION = 0.6  # segundos de crossfade entre imagenes
+TRANSICION = 0.6
 
 CARPETA_PENDIENTES = "Pendientes"
 CARPETA_SUBIDAS = "Subidas"
 CARPETA_VIDEOS_GENERADOS = "Videos Generados"
+CARPETA_VIDEOS_SUBIDOS = "Videos Subidos"
 
 DRIVE_FOLDER_ID_RAIZ = os.environ.get("DRIVE_FOLDER_ID_RAIZ")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-ANCHO, ALTO = 1920, 1080  # formato horizontal, video largo tipo podcast
+ANCHO, ALTO = 1920, 1080
 
-# Video de intro del canal (se pega al inicio de cada historia). Debe estar
-# en la raiz del repo, junto a este script.
 RUTA_INTRO = Path(__file__).parent / "intro.mp4"
-
 TMP_DIR = Path(tempfile.mkdtemp(prefix="relatos_medianoche_"))
-
-# Offset horario de Chile respecto a UTC — leccion aprendida de El Lado
-# Oscuro: nunca usar datetime.now()/date.today() crudo en un runner de
-# GitHub Actions (corre en UTC), siempre ajustar a la hora de Chile.
 OFFSET_CHILE = datetime.timedelta(hours=-4)
 
 def ahora_chile() -> datetime.datetime:
     return datetime.datetime.utcnow() + OFFSET_CHILE
-
-# ---------------------------------------------------------------------------
-# Lectura del texto de la historia (.docx)
-# ---------------------------------------------------------------------------
 
 def leer_texto_docx(ruta_docx: Path) -> str:
     documento = docx.Document(str(ruta_docx))
     parrafos = [p.text.strip() for p in documento.paragraphs if p.text.strip()]
     return "\n\n".join(parrafos)
 
-# ---------------------------------------------------------------------------
-# Audio (narracion completa con edge-tts)
-# ---------------------------------------------------------------------------
-
 async def generar_audio_tts(texto: str, ruta_salida: Path, voz: str = VOZ):
     comunicador = edge_tts.Communicate(texto, voz)
-    # Timeout de seguridad: si el servicio de Microsoft Edge se queda sin
-    # responder (colgado), esto evita que el job entero se atasque por horas
-    # hasta que lo mate el timeout de GitHub Actions (60 min).
     await asyncio.wait_for(comunicador.save(str(ruta_salida)), timeout=180)
 
 def _generar_silencio_mp3(ruta_salida: Path, duracion: float):
@@ -126,10 +103,6 @@ def agregar_silencios(ruta_audio_in: Path, ruta_audio_out: Path):
     for p in partes:
         p.close()
     final.close()
-
-# ---------------------------------------------------------------------------
-# Video (imagenes repartidas proporcional a la duracion total del audio)
-# ---------------------------------------------------------------------------
 
 def numero_desde_nombre(ruta: Path) -> int:
     m = re.search(r"\d+", ruta.stem)
@@ -153,10 +126,6 @@ def construir_video(imagenes: list, duracion_total: float) -> CompositeVideoClip
     duracion_por_imagen = duracion_total / len(imagenes)
     clips = [crear_clip_imagen(img, duracion_por_imagen) for img in imagenes]
     return concatenate_videoclips(clips, method="compose", padding=-TRANSICION)
-
-# ---------------------------------------------------------------------------
-# Titulo y descripcion
-# ---------------------------------------------------------------------------
 
 def generar_metadatos(nombre_historia: str, texto: str):
     if GEMINI_API_KEY:
@@ -183,17 +152,7 @@ def generar_metadatos(nombre_historia: str, texto: str):
     descripcion = f"{nombre_historia}\n\nUna historia real de terror narrada en Relatos de la Medianoche."
     return titulo, descripcion
 
-# ---------------------------------------------------------------------------
-# Reintentos (las llamadas a Drive a veces fallan con errores de red
-# transitorios, por ejemplo ssl.SSLEOFError, despues de que YouTube ya
-# publico el video. Reintentar evita que un corte de red tire todo el
-# trabajo ya hecho).
-# ---------------------------------------------------------------------------
-
 def con_reintentos(func, intentos=6, espera_base=5, descripcion="operacion de Drive"):
-    """Ejecuta func() reintentando con backoff exponencial si falla por un
-    error de red transitorio (SSL/socket). Si se agotan los intentos,
-    relanza la ultima excepcion."""
     for intento in range(1, intentos + 1):
         try:
             return func()
@@ -204,10 +163,6 @@ def con_reintentos(func, intentos=6, espera_base=5, descripcion="operacion de Dr
             espera = espera_base * (2 ** (intento - 1))
             print(f"[AVISO] {descripcion} fallo (intento {intento}/{intentos}): {e}. Reintentando en {espera}s...")
             time.sleep(espera)
-
-# ---------------------------------------------------------------------------
-# Google Drive helpers
-# ---------------------------------------------------------------------------
 
 def obtener_credenciales_drive():
     creds = Credentials(
@@ -260,7 +215,6 @@ def crear_subcarpeta_si_no_existe(drive_service, nombre: str, carpeta_padre_id: 
     return carpeta["id"]
 
 def obtener_historia_mas_antigua(drive_service, carpeta_pendientes_id: str):
-    """Devuelve la subcarpeta de historia mas antigua dentro de Pendientes/, o None."""
     query = (
         f"'{carpeta_pendientes_id}' in parents and trashed = false "
         "and mimeType = 'application/vnd.google-apps.folder'"
@@ -275,14 +229,6 @@ GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 DOCX_EXPORT_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 def descargar_carpeta_historia(drive_service, carpeta_id: str, destino_local: Path):
-    """Descarga todos los archivos (imagenes + texto) de la carpeta de la historia.
-
-    Acepta el texto de la historia en dos formatos:
-    - Un archivo .docx real (subido directamente a Drive).
-    - Un Google Doc nativo (creado/editado desde Google Docs) - en este caso se
-      exporta automaticamente a .docx antes de guardarlo localmente, para que el
-      resto del pipeline (leer_texto_docx) funcione igual en ambos casos.
-    """
     destino_local.mkdir(parents=True, exist_ok=True)
     resultado = drive_service.files().list(
         q=f"'{carpeta_id}' in parents and trashed = false",
@@ -293,7 +239,6 @@ def descargar_carpeta_historia(drive_service, carpeta_id: str, destino_local: Pa
     for archivo in archivos:
         nombre = archivo["name"]
         if archivo.get("mimeType") == GOOGLE_DOC_MIME:
-            # Google Doc nativo -> exportar como .docx
             if not nombre.lower().endswith(".docx"):
                 nombre = nombre + ".docx"
             ruta_local = destino_local / nombre
@@ -322,8 +267,15 @@ def subir_archivo_drive(drive_service, ruta_local: Path, carpeta_id: str, nombre
     archivo = drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
     return archivo["id"]
 
+def mover_archivo_drive(drive_service, archivo_id: str, carpeta_origen_id: str, carpeta_destino_id: str):
+    drive_service.files().update(
+        fileId=archivo_id,
+        addParents=carpeta_destino_id,
+        removeParents=carpeta_origen_id,
+        fields="id, parents",
+    ).execute()
+
 def mover_carpeta_drive(drive_service, carpeta_id: str, carpeta_origen_id: str, carpeta_destino_id: str):
-    """Mueve la carpeta completa (y todo su contenido) de origen a destino."""
     drive_service.files().update(
         fileId=carpeta_id,
         addParents=carpeta_destino_id,
@@ -331,17 +283,13 @@ def mover_carpeta_drive(drive_service, carpeta_id: str, carpeta_origen_id: str, 
         fields="id, parents",
     ).execute()
 
-# ---------------------------------------------------------------------------
-# YouTube
-# ---------------------------------------------------------------------------
-
 def publicar_en_youtube(youtube_service, ruta_video: Path, titulo: str, descripcion: str):
     body = {
         "snippet": {
             "title": titulo[:100],
             "description": descripcion[:5000],
             "tags": ["historias de terror", "relatos de terror", "terror real", "misterio", "relatos de la medianoche"],
-            "categoryId": "24",  # Entertainment
+            "categoryId": "24",
         },
         "status": {
             "privacyStatus": "public",
@@ -355,12 +303,8 @@ def publicar_en_youtube(youtube_service, ruta_video: Path, titulo: str, descripc
         _, respuesta = request.next_chunk()
     return respuesta["id"]
 
-# ---------------------------------------------------------------------------
-# Flujo principal
-# ---------------------------------------------------------------------------
-
 def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
-                           carpeta_subidas_id, carpeta_videos_gen_id) -> bool:
+                           carpeta_subidas_id, carpeta_videos_gen_id, carpeta_videos_subidos_id) -> bool:
     historia_info = obtener_historia_mas_antigua(drive_service, carpeta_pendientes_id)
     if historia_info is None:
         print("No hay historias pendientes en Drive. Nada que hacer.")
@@ -376,7 +320,7 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
     docx_local = next((carpeta_local / a["name"] for a in archivos if a["name"].lower().endswith(".docx")), None)
     if docx_local is None:
         print(f"[ERROR] La carpeta '{nombre_historia}' no tiene un archivo .docx con el texto. Se omite.")
-        return True  # se considera "procesada" para no bloquear el pipeline; revisar manualmente
+        return True
 
     texto = leer_texto_docx(docx_local)
     imagenes = ordenar_imagenes(carpeta_local)
@@ -386,19 +330,15 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
 
     print(f"Texto: {len(texto)} caracteres | Imagenes: {len(imagenes)}")
 
-    # --- Narracion ---
     print("Generando narracion con edge-tts...")
     ruta_tts_crudo = TMP_DIR / "narracion_cruda.mp3"
     asyncio.run(generar_audio_tts(texto, ruta_tts_crudo))
-    print("Narracion generada. Agregando silencios...")
     ruta_narracion_final = TMP_DIR / "narracion_final.mp3"
     agregar_silencios(ruta_tts_crudo, ruta_narracion_final)
-    print("Audio final listo.")
 
     audio_final = AudioFileClip(str(ruta_narracion_final))
     duracion_total = audio_final.duration
 
-    # --- Video ---
     video_imagenes = construir_video(imagenes, duracion_total)
     video_relato = video_imagenes.set_audio(audio_final)
 
@@ -421,60 +361,50 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
     )
     print("Video renderizado.")
 
-    # --- Metadatos ---
     titulo, descripcion = generar_metadatos(nombre_historia, texto)
     print(f"Titulo: {titulo}")
 
-    # --- Publicar en YouTube ---
+    hoy = ahora_chile().date().isoformat()
+
+    print("Subiendo video a Drive: Videos Generados/ (respaldo antes de YouTube)...")
+    carpeta_fecha_generados_id = con_reintentos(
+        lambda: crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id),
+        descripcion="crear/buscar subcarpeta de fecha en Videos Generados",
+    )
+    video_drive_id = con_reintentos(
+        lambda: subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_generados_id),
+        descripcion="subir video a Videos Generados (respaldo previo a YouTube)",
+    )
+    print(f"Video respaldado en Drive: Videos Generados/{hoy}/{ruta_video_final.name}")
+
     print("Subiendo video a YouTube...")
     video_id = publicar_en_youtube(youtube_service, ruta_video_final, titulo, descripcion)
     print(f"Publicado en YouTube: https://youtube.com/watch?v={video_id}")
 
-    # --- PASO CRITICO: mover la carpeta completa (imagenes + docx, tal cual
-    # esta, sin tocarla por partes ni crear subcarpetas intermedias) de
-    # Pendientes/ a Subidas/ en una sola llamada atomica a la API de Drive.
-    # Esto se hace INMEDIATAMENTE despues de publicar en YouTube, antes de
-    # cualquier otro paso de Drive, para que -aunque algo falle despues
-    # (ej. un corte de red al subir la copia de respaldo)- la historia ya
-    # quede marcada como subida y el pipeline nunca la vuelva a publicar
-    # duplicada. Se reintenta con backoff si hay un error de red transitorio.
+    print("YouTube confirmado. Moviendo video de Videos Generados/ a Videos Subidos/...")
+    carpeta_fecha_subidos_id = con_reintentos(
+        lambda: crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_subidos_id),
+        descripcion="crear/buscar subcarpeta de fecha en Videos Subidos",
+    )
+    con_reintentos(
+        lambda: mover_archivo_drive(drive_service, video_drive_id, carpeta_fecha_generados_id, carpeta_fecha_subidos_id),
+        descripcion="mover video de Videos Generados a Videos Subidos",
+    )
+    print(f"Video movido a Videos Subidos/{hoy}/{ruta_video_final.name}")
+
     con_reintentos(
         lambda: mover_carpeta_drive(drive_service, carpeta_id, carpeta_pendientes_id, carpeta_subidas_id),
         descripcion=f"mover carpeta '{nombre_historia}' a Subidas/",
     )
     print(f"Carpeta '{nombre_historia}' movida completa a Subidas/ (ya no se puede duplicar).")
 
-    # --- Respaldo del video (no critico): copia dentro de la carpeta ya
-    # movida y copia en Videos Generados/YYYY-MM-DD/. Si esto falla, no pasa
-    # nada grave: la historia ya esta a salvo en Subidas/ y en YouTube.
-    try:
-        con_reintentos(
-            lambda: subir_archivo_drive(drive_service, ruta_video_final, carpeta_id),
-            descripcion="subir copia del video a la carpeta de la historia",
-        )
-        hoy = ahora_chile().date().isoformat()
-        carpeta_fecha_id = con_reintentos(
-            lambda: crear_subcarpeta_si_no_existe(drive_service, hoy, carpeta_videos_gen_id),
-            descripcion="crear/buscar subcarpeta de fecha en Videos Generados",
-        )
-        con_reintentos(
-            lambda: subir_archivo_drive(drive_service, ruta_video_final, carpeta_fecha_id),
-            descripcion="subir copia de respaldo a Videos Generados",
-        )
-        print(f"Copia de respaldo guardada en Drive: Videos Generados/{hoy}/{ruta_video_final.name}")
-    except Exception as e:
-        print(f"[AVISO] No se pudo guardar la copia de respaldo en Drive (no critico, la historia ya esta segura): {e}")
-
     return True
 
-def ya_se_publico_hoy(drive_service, carpeta_videos_gen_id) -> bool:
-    """Contador diario: True si ya existe la carpeta de hoy (Videos Generados/YYYY-MM-DD/)
-    con al menos un video adentro. Evita publicar mas de 1 historia el mismo dia,
-    incluso si el workflow se dispara manualmente varias veces."""
+def ya_se_publico_hoy(drive_service, carpeta_videos_subidos_id) -> bool:
     hoy = ahora_chile().date().isoformat()
     query = (
         f"name = '{hoy}' and mimeType = 'application/vnd.google-apps.folder' "
-        f"and '{carpeta_videos_gen_id}' in parents and trashed = false"
+        f"and '{carpeta_videos_subidos_id}' in parents and trashed = false"
     )
     resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
     carpetas_hoy = resultado.get("files", [])
@@ -506,14 +436,18 @@ def main():
         lambda: crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_GENERADOS, DRIVE_FOLDER_ID_RAIZ),
         descripcion="buscar/crear carpeta Videos Generados/",
     )
+    carpeta_videos_subidos_id = con_reintentos(
+        lambda: crear_subcarpeta_si_no_existe(drive_service, CARPETA_VIDEOS_SUBIDOS, DRIVE_FOLDER_ID_RAIZ),
+        descripcion="buscar/crear carpeta Videos Subidos/",
+    )
 
-    if con_reintentos(lambda: ya_se_publico_hoy(drive_service, carpeta_videos_gen_id), descripcion="verificar contador diario"):
+    if con_reintentos(lambda: ya_se_publico_hoy(drive_service, carpeta_videos_subidos_id), descripcion="verificar contador diario"):
         print("Ya se publico una historia hoy (maximo 1 por dia). No se hace nada mas.")
         return
 
     procesar_una_historia(
         drive_service, youtube_service,
-        carpeta_pendientes_id, carpeta_subidas_id, carpeta_videos_gen_id,
+        carpeta_pendientes_id, carpeta_subidas_id, carpeta_videos_gen_id, carpeta_videos_subidos_id,
     )
 
     print("== Proceso completado ==")

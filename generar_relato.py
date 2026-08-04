@@ -25,6 +25,13 @@ ejemplo si un reintento manual lo dejo a medio mover) sin que la historia
 se haya publicado de verdad, y eso bloqueaba el pipeline con un falso
 positivo. Ahora el contador se basa en la señal definitiva de exito: si
 ya se movio una carpeta de historia completa a "Subidas/" hoy.
+
+CAMBIO 04-08-2026 (a pedido de Jose, via Claude): el canal ahora publica
+hasta 2 historias por dia (antes 1). El contador diario ahora CUENTA
+cuantas carpetas de historia se movieron a "Subidas/" hoy, y el pipeline
+se detiene recien al llegar a LIMITE_PUBLICACIONES_DIA. El workflow de
+GitHub Actions se dispara 2 veces al dia (ver .github/workflows/
+generar_relato.yml) para lograr esas 2 publicaciones diarias.
 """
 
 import os
@@ -70,6 +77,8 @@ CARPETA_PENDIENTES = "Pendientes"
 CARPETA_SUBIDAS = "Subidas"
 CARPETA_VIDEOS_GENERADOS = "Videos Generados"
 CARPETA_VIDEOS_SUBIDOS = "Videos Subidos"
+
+LIMITE_PUBLICACIONES_DIA = 2
 
 DRIVE_FOLDER_ID_RAIZ = os.environ.get("DRIVE_FOLDER_ID_RAIZ")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -408,13 +417,7 @@ def procesar_una_historia(drive_service, youtube_service, carpeta_pendientes_id,
 
     return True
 
-def ya_se_publico_hoy(drive_service, carpeta_subidas_id) -> bool:
-    """Contador diario: True si hoy (hora de Chile) ya se movio al menos una
-    carpeta de historia completa a Subidas/. Esta es la senal definitiva de
-    que una historia se publico con exito de principio a fin: no depende de
-    si quedo algun archivo de video suelto en Videos Subidos/ (que puede
-    pasar por un rechazo de YouTube o un reintento manual a medias, y antes
-    generaba falsos positivos que bloqueaban el pipeline sin necesidad)."""
+def contar_publicaciones_hoy(drive_service, carpeta_subidas_id) -> int:
     inicio_hoy_chile = ahora_chile().replace(hour=0, minute=0, second=0, microsecond=0)
     inicio_hoy_utc = (inicio_hoy_chile - OFFSET_CHILE).strftime("%Y-%m-%dT%H:%M:%S")
     query = (
@@ -423,7 +426,7 @@ def ya_se_publico_hoy(drive_service, carpeta_subidas_id) -> bool:
         f"and modifiedTime >= '{inicio_hoy_utc}'"
     )
     resultado = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    return len(resultado.get("files", [])) > 0
+    return len(resultado.get("files", []))
 
 def main():
     print("== Relatos de la Medianoche: generador de videos ==")
@@ -450,8 +453,12 @@ def main():
         descripcion="buscar/crear carpeta Videos Subidos/",
     )
 
-    if con_reintentos(lambda: ya_se_publico_hoy(drive_service, carpeta_subidas_id), descripcion="verificar contador diario"):
-        print("Ya se publico una historia hoy (maximo 1 por dia). No se hace nada mas.")
+    publicaciones_hoy = con_reintentos(
+        lambda: contar_publicaciones_hoy(drive_service, carpeta_subidas_id),
+        descripcion="verificar contador diario",
+    )
+    if publicaciones_hoy >= LIMITE_PUBLICACIONES_DIA:
+        print(f"Ya se publicaron {publicaciones_hoy} historias hoy (maximo {LIMITE_PUBLICACIONES_DIA} por dia). No se hace nada mas.")
         return
 
     procesar_una_historia(
